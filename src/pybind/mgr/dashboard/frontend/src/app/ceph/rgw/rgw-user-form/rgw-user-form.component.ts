@@ -1,5 +1,5 @@
 import { Component, OnInit } from '@angular/core';
-import { AbstractControl, AsyncValidatorFn, ValidationErrors, Validators } from '@angular/forms';
+import { AbstractControl, ValidationErrors, Validators } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 
 import * as _ from 'lodash';
@@ -177,7 +177,7 @@ export class RgwUserFormComponent implements OnInit {
               value[type + '_quota_max_size'] = null;
             } else {
               value[type + '_quota_max_size_unlimited'] = false;
-              value[type + '_quota_max_size'] = quota.max_size;
+              value[type + '_quota_max_size'] = `${quota.max_size} B`;
             }
             if (quota.max_objects < 0) {
               value[type + '_quota_max_objects_unlimited'] = true;

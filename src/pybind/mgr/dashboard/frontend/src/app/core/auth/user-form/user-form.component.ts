@@ -75,7 +75,7 @@ export class UserFormComponent implements OnInit {
   }
 
   ngOnInit() {
-    if (this.router.url.startsWith('/users/edit')) {
+    if (this.router.url.startsWith('/user-management/users/edit')) {
       this.mode = this.userFormMode.editing;
     }
     this.roleService.list().subscribe((roles: Array<UserFormRoleModel>) => {
@@ -132,10 +132,9 @@ export class UserFormComponent implements OnInit {
       () => {
         this.notificationService.show(
           NotificationType.success,
-          `User "${userFormModel.username}" has been created.`,
-          'Create User'
+          `Created user "${userFormModel.username}"`
         );
-        this.router.navigate(['/users']);
+        this.router.navigate(['/user-management/users']);
       },
       () => {
         this.userForm.setErrors({ cdSubmitButton: true });
@@ -209,10 +208,9 @@ export class UserFormComponent implements OnInit {
         } else {
           this.notificationService.show(
             NotificationType.success,
-            `User "${userFormModel.username}" has been updated.`,
-            'Edit User'
+            `Updated user "${userFormModel.username}"`
           );
-          this.router.navigate(['/users']);
+          this.router.navigate(['/user-management/users']);
         }
       },
       () => {

@@ -678,15 +678,10 @@ bool PrimaryLogPG::is_degraded_or_backfilling_object(const hobject_t& soid)
 
 bool PrimaryLogPG::is_degraded_on_async_recovery_target(const hobject_t& soid)
 {
-  for (set<pg_shard_t>::iterator i = acting_recovery_backfill.begin();
-       i != acting_recovery_backfill.end();
-       ++i) {
-    if (*i == get_primary()) continue;
-    pg_shard_t peer = *i;
-    auto peer_missing_entry = peer_missing.find(peer);
+  for (auto &i: async_recovery_targets) {
+    auto peer_missing_entry = peer_missing.find(i);
     if (peer_missing_entry != peer_missing.end() &&
-        peer_missing_entry->second.get_items().count(soid) &&
-        async_recovery_targets.count(peer)) {
+        peer_missing_entry->second.get_items().count(soid)) {
       dout(30) << __func__ << " " << soid << dendl;
       return true;
     }
@@ -4514,7 +4509,9 @@ void PrimaryLogPG::kick_snap_trim()
 {
   ceph_assert(is_active());
   ceph_assert(is_primary());
-  if (is_clean() && !snap_trimq.empty()) {
+  if (is_clean() &&
+      !state_test(PG_STATE_PREMERGE) &&
+      !snap_trimq.empty()) {
     if (get_osdmap()->test_flag(CEPH_OSDMAP_NOSNAPTRIM)) {
       dout(10) << __func__ << ": nosnaptrim set, not kicking" << dendl;
     } else {
@@ -10382,32 +10379,22 @@ void PrimaryLogPG::issue_repop(RepGather *repop, OpContext *ctx)
     }
   }
 
-  for (set<pg_shard_t>::const_iterator i = acting_recovery_backfill.begin();
-       i != acting_recovery_backfill.end();
-       ++i) {
-    pg_shard_t peer(*i);
-    if (peer == pg_whoami) continue;
-    if (async_recovery_targets.count(peer) && peer_missing[peer].is_missing(soid)) {
-      for (auto &&entry: ctx->log) {
-	missing_loc.add_missing(soid, ctx->at_version, eversion_t(), entry.is_delete());
-      }
-    }
-  }
-
-  dout(30) << __func__ << " missing_loc before: " << missing_loc.get_locations(soid) << dendl;
-
   if (requires_missing_loc) {
-    // clear out missing_loc
-    missing_loc.clear_location(soid);
-    for (set<pg_shard_t>::const_iterator i = actingset.begin();
-         i != actingset.end();
-         ++i) {
-      pg_shard_t peer(*i);
-      if (!peer_missing[peer].is_missing(soid))
-        missing_loc.add_location(soid, peer);
+    for (auto &&entry: ctx->log) {
+      dout(30) << __func__ << " missing_loc before: "
+               << missing_loc.get_locations(entry.soid) << dendl;
+      missing_loc.add_missing(entry.soid, entry.version,
+                              eversion_t(), entry.is_delete());
+      // clear out missing_loc
+      missing_loc.clear_location(entry.soid);
+      for (auto &i: actingset) {
+        if (!peer_missing[i].is_missing(entry.soid))
+          missing_loc.add_location(entry.soid, i);
+      }
+      dout(30) << __func__ << " missing_loc after: "
+               << missing_loc.get_locations(entry.soid) << dendl;
     }
   }
-  dout(30) << __func__ << " missing_loc after: " << missing_loc.get_locations(soid) << dendl;
 
   pgbackend->submit_transaction(
     soid,
@@ -11493,8 +11480,6 @@ void PrimaryLogPG::_applied_recovered_object_replica()
 void PrimaryLogPG::recover_got(hobject_t oid, eversion_t v)
 {
   dout(10) << "got missing " << oid << " v " << v << dendl;
-  dout(10) << __func__ << " complete_to "
-           << pg_log.get_log().complete_to->version << dendl;
   pg_log.recover_got(oid, v, info);
   if (pg_log.get_log().complete_to != pg_log.get_log().log.end()) {
     dout(10) << "last_complete now " << info.last_complete
@@ -11953,6 +11938,10 @@ void PrimaryLogPG::on_shutdown()
 
   clear_primary_state();
   cancel_recovery();
+
+  if (is_primary()) {
+    osd->clear_ready_to_merge(this);
+  }
 }
 
 void PrimaryLogPG::on_activate()
@@ -13745,6 +13734,7 @@ void PrimaryLogPG::agent_setup()
   ceph_assert(is_locked());
   if (!is_active() ||
       !is_primary() ||
+      state_test(PG_STATE_PREMERGE) ||
       pool.info.cache_mode == pg_pool_t::CACHEMODE_NONE ||
       pool.info.tier_of < 0 ||
       !get_osdmap()->have_pg_pool(pool.info.tier_of)) {

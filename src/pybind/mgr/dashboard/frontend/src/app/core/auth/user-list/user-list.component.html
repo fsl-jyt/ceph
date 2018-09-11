@@ -1,3 +1,5 @@
+<cd-user-tabs></cd-user-tabs>
+
 <cd-table [data]="users"
           columnMode="flex"
           [columns]="columns"
@@ -12,7 +14,7 @@
               *ngIf="permission.create && (
                 permission.update && !selection.hasSingleSelection ||
                 !permission.update)"
-              routerLink="/users/add">
+              routerLink="/user-management/users/add">
         <i class="fa fa-fw fa-plus"></i>
         <span i18n>Add</span>
       </button>
@@ -20,7 +22,7 @@
               class="btn btn-sm btn-primary"
               [ngClass]="{'disabled': !selection.hasSelection}"
               *ngIf="permission.update && (!permission.create || selection.hasSingleSelection)"
-              routerLink="/users/edit/{{ selection.first()?.username }}">
+              routerLink="/user-management/users/edit/{{ selection.first()?.username }}">
         <i class="fa fa-fw fa-pencil"></i>
         <span i18n>Edit</span>
       </button>
@@ -42,7 +44,7 @@
       <ul *dropdownMenu class="dropdown-menu" role="menu">
         <li role="menuitem"
             *ngIf="permission.create">
-          <a class="dropdown-item" routerLink="/users/add">
+          <a class="dropdown-item" routerLink="/user-management/users/add">
             <i class="fa fa-fw fa-plus"></i>
             <span i18n>Add</span>
           </a>
@@ -50,7 +52,7 @@
         <li role="menuitem"
             *ngIf="permission.update"
             [ngClass]="{'disabled': !selection.hasSingleSelection}">
-          <a class="dropdown-item" routerLink="/users/edit/{{ selection.first()?.username}}">
+          <a class="dropdown-item" routerLink="/user-management/users/edit/{{ selection.first()?.username}}">
             <i class="fa fa-fw fa-pencil"></i>
             <span i18n>Edit</span>
           </a>

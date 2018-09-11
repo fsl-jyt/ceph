@@ -163,16 +163,16 @@ class RGWReadDataSyncRecoveringShardsCR : public RGWShardCollectCR {
 
   uint64_t max_entries;
   int num_shards;
-  int shard_id{0};;
+  int shard_id{0};
 
   string marker;
-  map<int, std::set<std::string>> &entries_map;
+  std::vector<RGWRadosGetOmapKeysCR::ResultPtr>& omapkeys;
 
  public:
   RGWReadDataSyncRecoveringShardsCR(RGWDataSyncEnv *env, uint64_t _max_entries, int _num_shards,
-      map<int, std::set<std::string>>& _entries_map)
+                                    std::vector<RGWRadosGetOmapKeysCR::ResultPtr>& omapkeys)
     : RGWShardCollectCR(env->cct, MAX_CONCURRENT_SHARDS), env(env),
-    max_entries(_max_entries), num_shards(_num_shards), entries_map(_entries_map)
+      max_entries(_max_entries), num_shards(_num_shards), omapkeys(omapkeys)
   {}
   bool spawn_next() override;
 };
@@ -183,8 +183,10 @@ bool RGWReadDataSyncRecoveringShardsCR::spawn_next()
     return false;
  
   string error_oid = RGWDataSyncStatusManager::shard_obj_name(env->source_zone, shard_id) + ".retry";
+  auto& shard_keys = omapkeys[shard_id];
+  shard_keys = std::make_shared<RGWRadosGetOmapKeysCR::Result>();
   spawn(new RGWRadosGetOmapKeysCR(env->store, rgw_raw_obj(env->store->get_zone_params().log_pool, error_oid),
-                                  marker, &entries_map[shard_id], max_entries, nullptr), false);
+                                  marker, max_entries, shard_keys), false);
 
   ++shard_id;
   return true;
@@ -519,7 +521,8 @@ public:
                                  rgw_data_sync_status *status)
     : RGWCoroutine(_sync_env->cct), sync_env(_sync_env), store(sync_env->store),
       pool(store->get_zone_params().log_pool),
-      num_shards(num_shards), status(status) {
+      num_shards(num_shards), status(status),
+      tn(sync_env->sync_tracer->add_node(_tn_parent, "init_data_sync_status")) {
     lock_name = "sync_lock";
 
     status->sync_info.instance_id = instance_id;
@@ -532,11 +535,6 @@ public:
 
     sync_status_oid = RGWDataSyncStatusManager::sync_status_oid(sync_env->source_zone);
 
-    tn = sync_env->sync_tracer->add_node(new RGWSyncTraceNode(sync_env->cct,
-                                         sync_env->sync_tracer, 
-                                         _tn_parent,
-                                         "init_data_sync_status",
-                                         string()));
   }
 
   int operate() override {
@@ -654,10 +652,6 @@ int RGWRemoteDataLog::read_source_log_shards_info(map<int, RGWDataChangesLogInfo
 
 int RGWRemoteDataLog::read_source_log_shards_next(map<int, string> shard_markers, map<int, rgw_datalog_shard_data> *result)
 {
-  if (store->is_meta_master()) {
-    return 0;
-  }
-
   return run(new RGWListRemoteDataLogCR(&sync_env, shard_markers, 1, result));
 }
 
@@ -677,11 +671,7 @@ int RGWRemoteDataLog::init(const string& _source_zone, RGWRESTConn *_conn, RGWSy
     return ret;
   }
 
-  tn = sync_env.sync_tracer->add_node(new RGWSyncTraceNode(sync_env.cct,
-                                                           sync_env.sync_tracer, 
-                                                           sync_env.sync_tracer->root_node,
-                                                           "data",
-                                                           string()));
+  tn = sync_env.sync_tracer->add_node(sync_env.sync_tracer->root_node, "data");
 
   initialized = true;
 
@@ -722,15 +712,16 @@ int RGWRemoteDataLog::read_recovering_shards(const int num_shards, set<int>& rec
   }
   RGWDataSyncEnv sync_env_local = sync_env;
   sync_env_local.http_manager = &http_manager;
-  map<int, std::set<std::string>> entries_map;
+  std::vector<RGWRadosGetOmapKeysCR::ResultPtr> omapkeys;
+  omapkeys.resize(num_shards);
   uint64_t max_entries{1};
-  ret = crs.run(new RGWReadDataSyncRecoveringShardsCR(&sync_env_local, max_entries, num_shards, entries_map));
+  ret = crs.run(new RGWReadDataSyncRecoveringShardsCR(&sync_env_local, max_entries, num_shards, omapkeys));
   http_manager.stop();
 
   if (ret == 0) {
-    for (const auto& entry : entries_map) {
-      if (entry.second.size() != 0) {
-        recovering_shards.insert(entry.first);
+    for (int i = 0; i < num_shards; i++) {
+      if (omapkeys[i]->entries.size() != 0) {
+        recovering_shards.insert(i);
       }
     }
   }
@@ -1024,14 +1015,10 @@ class RGWRunBucketSyncCoroutine : public RGWCoroutine {
 public:
   RGWRunBucketSyncCoroutine(RGWDataSyncEnv *_sync_env, const rgw_bucket_shard& bs, const RGWSyncTraceNodeRef& _tn_parent)
     : RGWCoroutine(_sync_env->cct), sync_env(_sync_env), bs(bs),
-      status_oid(RGWBucketSyncStatusManager::status_oid(sync_env->source_zone, bs)) {
+      status_oid(RGWBucketSyncStatusManager::status_oid(sync_env->source_zone, bs)),
+      tn(sync_env->sync_tracer->add_node(_tn_parent, "bucket",
+                                         SSTR(bucket_shard_str{bs}))) {
     logger.init(sync_env, "Bucket", bs.get_key());
-    string bss = SSTR(bucket_shard_str{bs});
-    tn = sync_env->sync_tracer->add_node(new RGWSyncTraceNode(sync_env->cct,
-                                                              sync_env->sync_tracer, 
-                                                              _tn_parent,
-                                                              "bucket",
-                                                              bss));
   }
   ~RGWRunBucketSyncCoroutine() override {
     if (lease_cr) {
@@ -1072,11 +1059,7 @@ public:
                                                       marker_tracker(_marker_tracker),
                                                       error_repo(_error_repo), remove_from_repo(_remove_from_repo) {
     set_description() << "data sync single entry (source_zone=" << sync_env->source_zone << ") key=" <<_raw_key << " entry=" << entry_marker;
-    tn = sync_env->sync_tracer->add_node(new RGWSyncTraceNode(sync_env->cct,
-                                                              sync_env->sync_tracer, 
-                                                              _tn_parent,
-                                                              "entry",
-                                                              raw_key));
+    tn = sync_env->sync_tracer->add_node(_tn_parent, "entry", raw_key);
   }
 
   int operate() override {
@@ -1157,9 +1140,9 @@ class RGWDataSyncShardCR : public RGWCoroutine {
   uint32_t shard_id;
   rgw_data_sync_marker sync_marker;
 
+  RGWRadosGetOmapKeysCR::ResultPtr omapkeys;
   std::set<std::string> entries;
   std::set<std::string>::iterator iter;
-  bool more = false;
 
   string oid;
 
@@ -1200,7 +1183,7 @@ class RGWDataSyncShardCR : public RGWCoroutine {
   string error_marker;
   int max_error_entries;
 
-  ceph::real_time error_retry_time;
+  ceph::coarse_real_time error_retry_time;
 
 #define RETRY_BACKOFF_SECS_MIN 60
 #define RETRY_BACKOFF_SECS_DEFAULT 60
@@ -1315,15 +1298,16 @@ public:
       set_marker_tracker(new RGWDataSyncShardMarkerTrack(sync_env, status_oid, sync_marker, tn));
       total_entries = sync_marker.pos;
       do {
+        omapkeys = std::make_shared<RGWRadosGetOmapKeysCR::Result>();
         yield call(new RGWRadosGetOmapKeysCR(sync_env->store, rgw_raw_obj(pool, oid),
-                                             sync_marker.marker, &entries,
-                                             max_entries, &more));
+                                             sync_marker.marker, max_entries, omapkeys));
         if (retcode < 0) {
           tn->log(0, SSTR("ERROR: RGWRadosGetOmapKeysCR() returned ret=" << retcode));
           lease_cr->go_down();
           drain_all();
           return set_cr_error(retcode);
         }
+        entries = std::move(omapkeys->entries);
         if (entries.size() > 0) {
           tn->set_flag(RGW_SNS_FLAG_ACTIVE); /* actually have entries to sync */
         }
@@ -1345,7 +1329,8 @@ public:
           }
           sync_marker.marker = *iter;
         }
-      } while (more);
+      } while (omapkeys->more);
+      omapkeys.reset();
 
       tn->unset_flag(RGW_SNS_FLAG_ACTIVE); /* actually have entries to sync */
 
@@ -1409,31 +1394,34 @@ public:
           }
         }
 
-        /* process bucket shards that previously failed */
-        yield call(new RGWRadosGetOmapKeysCR(sync_env->store, rgw_raw_obj(pool, error_oid),
-                                             error_marker, &error_entries,
-                                             max_error_entries, &more));
-        tn->log(20, SSTR("read error repo, got " << error_entries.size() << " entries"));
-        iter = error_entries.begin();
-        for (; iter != error_entries.end(); ++iter) {
-          error_marker = *iter;
-          tn->log(20, SSTR("handle error entry: " << error_marker));
-          spawn(new RGWDataSyncSingleEntryCR(sync_env, error_marker, error_marker, nullptr /* no marker tracker */, error_repo, true, tn), false);
-        }
-        if (!more) {
-          if (error_marker.empty() && error_entries.empty()) {
-            /* the retry repo is empty, we back off a bit before calling it again */
-            retry_backoff_secs *= 2;
-            if (retry_backoff_secs > RETRY_BACKOFF_SECS_MAX) {
-              retry_backoff_secs = RETRY_BACKOFF_SECS_MAX;
-            }
-          } else {
-            retry_backoff_secs = RETRY_BACKOFF_SECS_DEFAULT;
+        if (error_retry_time <= ceph::coarse_real_clock::now()) {
+          /* process bucket shards that previously failed */
+          omapkeys = std::make_shared<RGWRadosGetOmapKeysCR::Result>();
+          yield call(new RGWRadosGetOmapKeysCR(sync_env->store, rgw_raw_obj(pool, error_oid),
+                                               error_marker, max_error_entries, omapkeys));
+          error_entries = std::move(omapkeys->entries);
+          tn->log(20, SSTR("read error repo, got " << error_entries.size() << " entries"));
+          iter = error_entries.begin();
+          for (; iter != error_entries.end(); ++iter) {
+            error_marker = *iter;
+            tn->log(20, SSTR("handle error entry: " << error_marker));
+            spawn(new RGWDataSyncSingleEntryCR(sync_env, error_marker, error_marker, nullptr /* no marker tracker */, error_repo, true, tn), false);
           }
-          error_retry_time = ceph::real_clock::now() + make_timespan(retry_backoff_secs);
-          error_marker.clear();
+          if (!omapkeys->more) {
+            if (error_marker.empty() && error_entries.empty()) {
+              /* the retry repo is empty, we back off a bit before calling it again */
+              retry_backoff_secs *= 2;
+              if (retry_backoff_secs > RETRY_BACKOFF_SECS_MAX) {
+                retry_backoff_secs = RETRY_BACKOFF_SECS_MAX;
+              }
+            } else {
+              retry_backoff_secs = RETRY_BACKOFF_SECS_DEFAULT;
+            }
+            error_retry_time = ceph::coarse_real_clock::now() + make_timespan(retry_backoff_secs);
+            error_marker.clear();
+          }
         }
-
+        omapkeys.reset();
 
 #define INCREMENTAL_MAX_ENTRIES 100
         tn->log(20, SSTR("shard_id=" << shard_id << " sync_marker=" << sync_marker.marker));
@@ -1491,13 +1479,29 @@ public:
         if (!truncated) {
           // we reached the end, wait a while before checking for more
           tn->unset_flag(RGW_SNS_FLAG_ACTIVE);
-#define INCREMENTAL_INTERVAL 20
-          yield wait(utime_t(INCREMENTAL_INTERVAL, 0));
-        }
+	  yield wait(get_idle_interval());
+	}
       } while (true);
     }
     return 0;
   }
+
+  utime_t get_idle_interval() const {
+#define INCREMENTAL_INTERVAL 20
+    ceph::timespan interval = std::chrono::seconds(INCREMENTAL_INTERVAL);
+    if (!ceph::coarse_real_clock::is_zero(error_retry_time)) {
+      auto now = ceph::coarse_real_clock::now();
+      if (error_retry_time > now) {
+        auto d = error_retry_time - now;
+        if (interval > d) {
+          interval = d;
+        }
+      }
+    }
+    // convert timespan -> time_point -> utime_t
+    return utime_t(ceph::coarse_real_clock::zero() + interval);
+  }
+
   void stop_spawned_services() {
     lease_cr->go_down();
     if (error_repo) {
@@ -1525,11 +1529,7 @@ public:
 						      pool(_pool),
 						      shard_id(_shard_id),
 						      sync_marker(_marker) {
-    tn = sync_env->sync_tracer->add_node(new RGWSyncTraceNode(sync_env->cct,
-                                         sync_env->sync_tracer, 
-                                         _tn_parent,
-                                         "shard",
-                                         SSTR(shard_id)));
+    tn = sync_env->sync_tracer->add_node(_tn_parent, "shard", std::to_string(shard_id));
   }
 
   RGWCoroutine *alloc_cr() override {
@@ -1746,11 +1746,7 @@ public:
   RGWDataSyncControlCR(RGWDataSyncEnv *_sync_env, uint32_t _num_shards,
                        RGWSyncTraceNodeRef& _tn_parent) : RGWBackoffControlCR(_sync_env->cct, exit_on_error),
                                                           sync_env(_sync_env), num_shards(_num_shards) {
-    tn = sync_env->sync_tracer->add_node(new RGWSyncTraceNode(sync_env->cct,
-                                         sync_env->sync_tracer, 
-                                         _tn_parent,
-                                         "sync",
-                                         string()));
+    tn = sync_env->sync_tracer->add_node(_tn_parent, "sync");
   }
 
   RGWCoroutine *alloc_cr() override {
@@ -2087,9 +2083,9 @@ class RGWReadRecoveringBucketShardsCoroutine : public RGWCoroutine {
   string marker;
   string error_oid;
 
+  RGWRadosGetOmapKeysCR::ResultPtr omapkeys;
   set<string> error_entries;
   int max_omap_entries;
-  bool more = false;
   int count;
 
 public:
@@ -2111,8 +2107,9 @@ int RGWReadRecoveringBucketShardsCoroutine::operate()
     //read recovering bucket shards
     count = 0;
     do {
+      omapkeys = std::make_shared<RGWRadosGetOmapKeysCR::Result>();
       yield call(new RGWRadosGetOmapKeysCR(store, rgw_raw_obj(store->get_zone_params().log_pool, error_oid), 
-            marker, &error_entries, max_omap_entries, &more));
+            marker, max_omap_entries, omapkeys));
 
       if (retcode == -ENOENT) {
         break;
@@ -2124,6 +2121,7 @@ int RGWReadRecoveringBucketShardsCoroutine::operate()
         return set_cr_error(retcode);
       }
 
+      error_entries = std::move(omapkeys->entries);
       if (error_entries.empty()) {
         break;
       }
@@ -2132,7 +2130,7 @@ int RGWReadRecoveringBucketShardsCoroutine::operate()
       marker = *error_entries.rbegin();
       recovering_buckets.insert(std::make_move_iterator(error_entries.begin()),
                                 std::make_move_iterator(error_entries.end()));
-    } while(more && count < max_entries);
+    } while (omapkeys->more && count < max_entries);
   
     return set_cr_done();
   }
@@ -2586,11 +2584,7 @@ public:
     set_status("init");
 
     logger.init(sync_env, "Object", ss.str());
-    tn = sync_env->sync_tracer->add_node(new RGWSyncTraceNode(sync_env->cct,
-                                                              sync_env->sync_tracer, 
-                                                              _tn_parent,
-                                                              "entry",
-                                                              SSTR(key)));
+    tn = sync_env->sync_tracer->add_node(_tn_parent, "entry", SSTR(key));
 
     tn->log(20, SSTR("bucket sync single entry (source_zone=" << sync_env->source_zone << ") b=" << ss.str() << " log_entry=" << entry_marker << " op=" << (int)op << " op_state=" << (int)op_state));
     error_injection = (sync_env->cct->_conf->rgw_sync_data_inject_err_probability > 0);
@@ -2717,14 +2711,11 @@ public:
     : RGWCoroutine(_sync_env->cct), sync_env(_sync_env), bs(bs),
       bucket_info(_bucket_info), lease_cr(lease_cr), sync_info(sync_info),
       marker_tracker(sync_env, status_oid, sync_info.full_marker),
-      status_oid(status_oid) {
+      status_oid(status_oid),
+      tn(sync_env->sync_tracer->add_node(tn_parent, "full_sync",
+                                         SSTR(bucket_shard_str{bs}))) {
     logger.init(sync_env, "BucketFull", bs.get_key());
     zones_trace.insert(sync_env->source_zone);
-    tn = sync_env->sync_tracer->add_node(new RGWSyncTraceNode(sync_env->cct,
-                                                              sync_env->sync_tracer, 
-                                                              tn_parent,
-                                                              "full_sync",
-                                                              SSTR(bucket_shard_str{bs})));
     marker_tracker.set_tn(tn);
   }
 
@@ -2876,17 +2867,14 @@ public:
     : RGWCoroutine(_sync_env->cct), sync_env(_sync_env), bs(bs),
       bucket_info(_bucket_info), lease_cr(lease_cr), sync_info(sync_info),
       marker_tracker(sync_env, status_oid, sync_info.inc_marker),
-      status_oid(status_oid), zone_id(_sync_env->store->get_zone().id)
+      status_oid(status_oid), zone_id(_sync_env->store->get_zone().id),
+      tn(sync_env->sync_tracer->add_node(_tn_parent, "inc_sync",
+                                         SSTR(bucket_shard_str{bs})))
   {
     set_description() << "bucket shard incremental sync bucket="
         << bucket_shard_str{bs};
     set_status("init");
     logger.init(sync_env, "BucketInc", bs.get_key());
-    tn = sync_env->sync_tracer->add_node(new RGWSyncTraceNode(sync_env->cct,
-                                                              sync_env->sync_tracer, 
-                                                              _tn_parent,
-                                                              "inc_sync",
-                                                              SSTR(bucket_shard_str{bs})));
     marker_tracker.set_tn(tn);
   }
 

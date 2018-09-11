@@ -81,7 +81,7 @@ struct failure_info_t {
 			     MonOpRequestRef op) {
     map<int, failure_reporter_t>::iterator p = reporters.find(who);
     if (p == reporters.end()) {
-      if (max_failed_since < failed_since)
+      if (max_failed_since != utime_t() && max_failed_since < failed_since)
 	max_failed_since = failed_since;
       p = reporters.insert(map<int, failure_reporter_t>::value_type(who, failure_reporter_t(failed_since))).first;
     }
@@ -108,6 +108,7 @@ struct failure_info_t {
       return MonOpRequestRef();
     MonOpRequestRef ret = p->second.op;
     reporters.erase(p);
+    max_failed_since = utime_t();
     return ret;
   }
 };
@@ -387,6 +388,9 @@ private:
 
   bool preprocess_pg_created(MonOpRequestRef op);
   bool prepare_pg_created(MonOpRequestRef op);
+
+  bool preprocess_pg_ready_to_merge(MonOpRequestRef op);
+  bool prepare_pg_ready_to_merge(MonOpRequestRef op);
 
   int _check_remove_pool(int64_t pool_id, const pg_pool_t &pool, ostream *ss);
   bool _check_become_tier(

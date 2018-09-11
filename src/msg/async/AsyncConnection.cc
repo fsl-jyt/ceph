@@ -113,7 +113,7 @@ static void alloc_aligned_buffer(bufferlist& data, unsigned len, unsigned off)
     left -= head;
   }
   alloc_len += left;
-  bufferptr ptr(buffer::create_page_aligned(alloc_len));
+  bufferptr ptr(buffer::create_small_page_aligned(alloc_len));
   if (head)
     ptr.set_offset(CEPH_PAGE_SIZE - head);
   data.push_back(std::move(ptr));
@@ -1535,8 +1535,8 @@ ssize_t AsyncConnection::handle_connect_msg(ceph_msg_connect &connect, bufferlis
     lock.lock();
     char tag;
     if (need_challenge && !had_challenge && authorizer_challenge) {
-      ldout(async_msgr->cct,0) << __func__ << ": challenging authorizer"
-			       << dendl;
+      ldout(async_msgr->cct,10) << __func__ << ": challenging authorizer"
+			        << dendl;
       ceph_assert(authorizer_reply.length());
       tag = CEPH_MSGR_TAG_CHALLENGE_AUTHORIZER;
     } else {
